@@ -1,0 +1,232 @@
+install.packages("spdep","voronoi","cluster")
+require(spdep)
+require(voronoi)
+require(cluster)
+wd <- "E:/Khaki/SYA/LREIS/Jan14/Stratification"
+totalsp <- readShapePoly(file.path(wd,"hebei_newnew.shp"),delete_null_obj = TRUE)
+sn <- 6#分区数目
+keeps <- c("fcjzrs","POINT_X","POINT_Y")
+#Step 1.pd公式pd(值,层)
+pd <- function(value.col,strata.col) 
+{
+  if (length(strata.col)!= length(value.col)) {
+    warning("row numbers in value.col and strata.col are not equal")
+  }
+  m <- split(value.col,strata.col)
+  sum.value <- value.col
+  sum.N <- length(value.col)
+  sum.sub.var <- 0;
+  sum.total.var <- sum.N*var(sum.value)
+  for (k in 1:length(m)) {
+    nk <- length(m[[k]])
+    sum.sub.var <- sum.sub.var + nk*var(m[[k]])
+  }
+  PD <- 1-(sum.sub.var/sum.total.var); 
+}
+#Step 1.0泰森多边形
+getVoronoi <- function(station.pts)
+{
+  require(deldir)
+  crds <- station.pts@coords
+  value <- station.pts@data$z
+  station <- station.pts@data$station
+  z <- deldir(crds[,1], crds[,2])
+  w <- tile.list(z)
+  polys <- vector(mode='list', length=length(w))
+  require(sp)
+  for (i in seq(along=polys)) 
+  {
+    pcrds <- cbind(w[[i]]$x, w[[i]]$y)
+    pcrds <- rbind(pcrds, pcrds[1,])
+    polys[[i]] <- Polygons(list(Polygon(pcrds)), ID=as.character(i))
+  }
+  SP <- SpatialPolygons(polys)
+  getVoronoi <- SpatialPolygonsDataFrame(SP,data=data.frame(x=crds[,1],y=crds[,2],station = station,value = value,row.names=sapply(slot(SP,'polygons'),function(x) slot(x,'ID'))))
+}
+
+Normalize <- function(oData)
+{
+  return((oData-min(oData))/diff(range(oData)))
+}
+#Step 0 数据归一化
+ToNormalize <- totalsp@data[keeps]
+totalsp@data[keeps] <- cbind(Normalize(ToNormalize[,1]),Normalize(ToNormalize[,2]),Normalize(ToNormalize[,3]))
+colnames(totalsp@data[keeps]) <- keeps
+#Step 1 初始分区
+##Stratification <- function() {
+
+
+initial.str <- pam(totalsp@data[keeps], sn)
+station <- c(1:nrow(totalsp@data))
+cluster <- as.matrix(cbind(station,initial.str$data,initial.str$clustering))
+colnames(cluster) <- c("station",keeps,"str")
+totalsp@data <- as.data.frame(cluster)
+writePolyShape(totalsp,file.path(wd,sprintf("station_voronoi-%d.shp",sn)))
+vor.totalsp <- readShapePoly(file.path(wd,sprintf("station_voronoi-%d.shp",sn)),delete_null_obj = TRUE)
+##之前设置的随机噪音加入到值中
+#vor.totalsp@data$value <- vor.totalsp@data$value+vor.totalsp@data$ran+vor.totalsp@data$rnd
+#vor.totalsp@data <- vor.totalsp@data[,-(1)]
+#vor.totalsp@data <- vor.totalsp@data[,-(5:6)]
+
+coords <- coordinates(vor.totalsp)
+nb <- poly2nb(vor.totalsp,queen=FALSE)
+#island.biggest <- list(1,2,3,4,5)
+#island.small <-list(0,0,0,0,0)
+for (lvl in 1:sn) {
+  island.biggest <- numeric()
+  all.index <- which(vor.totalsp@data$str==lvl)
+  remain <- all.index
+  while (length(remain)!=0) {
+    if (length(remain)==1) 
+    {island.seed <- remain
+    } else {
+      island.seed <- sample(remain,1)
+    }
+    infect.seed <- island.seed
+    ##island1
+    ##if (length(all.index)==1) {infect.seed <- all.index
+    ##}  else {infect.seed <- sample(all.index,1)}
+    unchecked=infect.seed
+    infected=infect.seed
+    uninfected.ind <- which(all.index!=infect.seed)
+    uninfected <- all.index[uninfected.ind]
+    index <- infect.seed
+    ## INFECT function
+    infect <- function(x,unchk,infec,uninfec,id) {
+      #0 find neighbours of x and their index
+      neighbor <- nb[x][[1]]
+      nb.samelvl <- NULL
+      for (i in neighbor) {
+        if (vor.totalsp@data[i,"str"]==lvl) {nb.samelvl <- union(nb.samelvl, i)}}
+      #1 union x into island
+      id <- union(id,x)
+      #2 mark x as infected=[1. add x into infected; 2. cross out x from uninfected]
+      infec <- union(infec,x)    
+      uninfec.ind <- which(uninfec!=x)
+      uninfec <-uninfec[uninfec.ind]
+      #3 add neighbours&&uninfected into unchecked
+      for (i in nb.samelvl) {
+        if (is.element(i,uninfec)) {unchk <- union(unchk, i)}}
+      #4 remove x from unchecked
+      unchk.ind <- which(unchk!=x)
+      unchk <- unchk[unchk.ind]
+      #return:
+      isl <- list(unchk, infec, uninfec, id)
+      isl
+    }
+    ##spreading...
+    while (length(unchecked)>0) {          # this while define when to end an island
+      if (length(unchecked)==1) {new.polygon <- unchecked
+      } else {new.polygon <- sample(unchecked,1)}
+      isl1 <- infect(new.polygon, unchecked, infected, uninfected, index)
+      unchecked <- isl1[[1]]
+      infected <- isl1[[2]]
+      uninfected <- isl1[[3]]
+      index <- isl1[[4]]
+    }
+    #remain <- NULL
+    #for(i in all.index){
+    #  if (!is.element(i,index)) {
+    #    remain <- union(i, remain)
+    #    }
+    #  }
+    remain <- setdiff(remain,index)
+    #if (!length(remain)) {remain <- "There is no small island"}
+    ##好了 上面这一部分已经够用了
+    ##把你们下面这些全都注释掉！
+    ##while (length(all.index)-length()) {   # this while define when to end a level
+    ##island2
+    ##  if (length(uninfected)==1) {infect.seed2 <- uninfected
+    ##  } else {infect.seed2 <- sample(uninfected,1)}
+    ##isl2 <- c(unchecked = infect.seed2, infected=infected.seed2, uninfected=isl1["uninfected"], index=infect.seed2)
+    ##while (length(isl2[unchecked])){
+    ##  if (length(isl2[unchecked])==1) {new.polygon <- isl2[unchecked]}
+    ##  else {new.polygon <- sample("isl2[unchecked]",1)}
+    ##  isl2 <- infect(new.polygon)}
+    ##isl1 & 2 which is bigger?
+    ##if (length(isl1[index])<length(isl2[index])) {isl1 <- isl2}
+    ##Refresh "uninfected" list
+    ##isl1[uninfected] <-isl2[uninfected]}
+    if (length(island.biggest) > length(index)) {
+      change.str <- index
+    } else {
+      change.str <- island.biggest
+      island.biggest <- index
+    }
+    #     if (length(island.biggest)<length(index)) {
+    #       change.str <- island.biggest
+    #       island.biggest <- index
+    #     } else {
+    #       change.str <- index
+    #     }
+    ngb <- NULL
+    for (p in change.str) {
+      ngb <- c(ngb,nb[[p]])
+      ngb <- setdiff(ngb,change.str)
+    }
+    if (length(vor.totalsp@data$str[ngb])!=0) {
+      change.new.str.rownames <- as.matrix(row.names(as.matrix(sort(table(vor.totalsp@data$str[ngb])))))
+      change.new.str<- change.new.str.rownames[nrow(change.new.str.rownames),1]
+      vor.totalsp@data$str[change.str] <- as.integer(change.new.str)
+    }
+    
+    #island.biggest[[lvl]] <- index
+    #island.small[[lvl]] <- remain
+    #     remain <- setdiff(remain,change.str)
+    #     print("level")
+    #     print(lvl)
+    #     print("length of island.biggest")
+    #     print(length(island.biggest))
+    #     print("index")
+    #     print(index)
+    #     print("vor.totalsp@data$str[1782]")
+    #     print(vor.totalsp@data$str[1782])
+  }
+  
+}
+##}
+writePolyShape(vor.totalsp,file.path(wd,sprintf("station_voronoi-%dStep4.shp",sn)));
+##Step 2将每组中[nb不全在同一层]的polygon读取
+boundary <- NULL
+current.str.all.obs <- vor.totalsp@data$str
+value <- vor.totalsp@data$fcjzrs
+for (x in 1:10) {
+  for (k in vor.totalsp@data$station) 
+  {
+    current.index <- which(vor.totalsp@data$station == k)
+    nb.lst <- nb[current.index]
+    if ((max(current.str.all.obs[nb.lst[[1]]])-min(current.str.all.obs[nb.lst[[1]]]))>0) {
+      current.index.row <- cbind(current.index,current.str.all.obs[current.index])
+      boundary <-rbind(boundary,current.index.row)
+    }
+  }
+  colnames(boundary) <- c("current.index","str")
+  ###
+  #current.str.all.obs <- vor.totalsp@data$str
+  #value <-vor.totalsp@data$value
+  for (k in boundary[,1])
+  {
+    current.index <- k
+    nb.lst <- nb[current.index]
+    PD <- pd(value,current.str.all.obs)
+    #str.judge <- vor.totalsp@data$str[nb.lst[[1]]]-current.str.all.obs[current.index]
+    #current.str.all.obs
+    for (m in current.str.all.obs[nb.lst[[1]]]) { #nb中出现几种strata值，m即为几种值
+      current.index.in.boundary <- which(boundary[,1] == k)
+      if (m==boundary[current.index.in.boundary,2]) {
+        next
+      } else {
+        try.new.str <- current.str.all.obs
+        try.new.str[current.index] <- m
+        PD1 <- pd(value,try.new.str)
+        if (PD1>PD) {
+          current.str.all.obs[current.index] <-m
+        }
+      }
+    }
+  }
+  print(x)
+  print(PD)
+}
+vor.totalsp@data$str <- current.str.all.obs
+writePolyShape(vor.totalsp,file.path(wd,sprintf("station_voronoi-%dStep3.shp",sn)))
